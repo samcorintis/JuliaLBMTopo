@@ -16,7 +16,7 @@ const c = [  0   0;
 
 const w = [4 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 36, 1 / 36, 1 / 36, 1 / 36]
 
-const resolution = 128
+const resolution = 512
 const dx = 1 / resolution
 const dt = dx
 
@@ -390,6 +390,10 @@ function run_forward!(gamma, rho, u, v, p, q_t, T, f, g, alpha_gamma, beta_gamma
             savefig("run/step_$(index)_T.png")
             u_hm = heatmap(y, x, sqrt.(u.^2 + v.^2))
             savefig("run/step_$(index)_u.png")
+            u_x_hm = heatmap(y, x, u)
+            savefig("run/step_$(index)_u_x.png")
+            u_x_hm = heatmap(y, x, v)
+            savefig("run/step_$(index)_u_y.png")
             F_hm = heatmap(y, x, sqrt.(F[1,:,:].^2 + F[2,:,:].^2))
             savefig("run/step_$(index)_F.png")
             rho_hm = heatmap(y, x, rho)
@@ -623,6 +627,12 @@ function run_ap(f_i, rho_i, j_i, m_i, F_i, u, v, alpha_gamma, tau_f)
 
             m_i_hm = heatmap(y, x, sqrt.(m_i[1, :, :].^2 + m_i[2, :, :].^2))
             savefig("run/step_$(index)_m_i.png")
+            j_i_hm = heatmap(y, x, sqrt.(j_i[1, :, :].^2 + j_i[2, :, :].^2))
+            savefig("run/step_$(index)_j_i.png")
+            m_i_x_hm = heatmap(y, x, (m_i[1, :, :]))
+            savefig("run/step_$(index)_m_i_x.png")
+            m_i_x_hm = heatmap(y, x, (m_i[2, :, :]))
+            savefig("run/step_$(index)_m_i_y.png")
             F_i_hm = heatmap(y, x, sqrt.(F_i[1,:,:].^2 + F_i[2,:,:].^2))
             savefig("run/step_$(index)_F_i.png")
             rho_i_hm = heatmap(y, x, rho_i)
