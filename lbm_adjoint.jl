@@ -20,7 +20,7 @@ const resolution = 128
 const dx = 1 / resolution
 const dt = dx
 
-const output_interval = 32
+const output_interval = 100
 
 
 # Equation 32
@@ -34,7 +34,7 @@ const ramp_beta = 0.1
 
 const t_end = 100.0
 # const n_t = Int(t_end / dt)
-const n_t = 100
+const n_t = 1000
 
 
 # Equation 68, 69
@@ -107,8 +107,6 @@ end
 function relax!(f, g, p, rho, u, v, T, tau_f, tau_g)
     f_eq_thread_local = [zeros(Float32, 9) for i in 1:Threads.nthreads()]
     g_eq_thread_local = [zeros(Float32, 9) for i in 1:Threads.nthreads()]
-
- 
 
     Threads.@threads for ix in 1:n_x
         for iy in 1:n_y
@@ -527,60 +525,60 @@ function ap_advect_f!(f_i)
 
     ## Boundary Conditions
 
-    # x_0 = Int(floor((0.5 - 0.5 * inlet_width) * n_x))
-    # x_1 = Int(floor((0.5 + 0.5 * inlet_width) * n_x))
+    x_0 = Int(floor((0.5 - 0.5 * inlet_width) * n_x))
+    x_1 = Int(floor((0.5 + 0.5 * inlet_width) * n_x))
 
-    # # Bounce Back Left 
-    # ix = 1
-    # Threads.@threads for iy in 1:n_y
-    #     f_new[6,ix,iy] = f[8,ix,iy]
-    #     f_new[2,ix,iy] = f[4,ix,iy]
-    #     f_new[9,ix,iy] = f[7,ix,iy]
-    # end
+    # Bounce Back Left 
+    ix = 1
+    Threads.@threads for iy in 1:n_y
+        f_i_new[8,ix,iy] = f_i[6,ix,iy]
+        f_i_new[4,ix,iy] = f_i[2,ix,iy]
+        f_i_new[7,ix,iy] = f_i[9,ix,iy]
+    end
 
-    # # Bounce Back Right
-    # ix = n_x
-    # Threads.@threads for iy in 1:n_y
-    #     f_new[8,ix,iy] = f[6,ix,iy]
-    #     f_new[4,ix,iy] = f[2,ix,iy]
-    #     f_new[7,ix,iy] = f[9,ix,iy]
-    # end
+    # Bounce Back Right
+    ix = n_x
+    Threads.@threads for iy in 1:n_y
+        f_i_new[6,ix,iy] = f_i[8,ix,iy]
+        f_i_new[2,ix,iy] = f_i[4,ix,iy]
+        f_i_new[9,ix,iy] = f_i[7,ix,iy]
+    end
 
-    # # Bounce Back Bottom
-    # iy = 1
-    # Threads.@threads for ix in 1:n_x
-    #     f_new[3,ix,iy] = f[5,ix,iy]
-    #     f_new[6,ix,iy] = f[8,ix,iy]
-    #     f_new[7,ix,iy] = f[9,ix,iy]
-    # end
+    # Bounce Back Bottom
+    iy = 1
+    Threads.@threads for ix in 1:n_x
+        f_i_new[5,ix,iy] = f_i[3,ix,iy]
+        f_i_new[8,ix,iy] = f_i[6,ix,iy]
+        f_i_new[9,ix,iy] = f_i[7,ix,iy]
+    end
 
-    # # Bounce Back Top
-    # iy = n_y
-    # Threads.@threads for ix in 1:n_x
-    #     f_new[5,ix,iy] = f[3,ix,iy]
-    #     f_new[8,ix,iy] = f[6,ix,iy]
-    #     f_new[9,ix,iy] = f[7,ix,iy]
-    # end
+    # Bounce Back Top
+    iy = n_y
+    Threads.@threads for ix in 1:n_x
+        f_i_new[3,ix,iy] = f_i[5,ix,iy]
+        f_i_new[6,ix,iy] = f_i[8,ix,iy]
+        f_i_new[7,ix,iy] = f_i[9,ix,iy]
+    end
     
-    # # Inlet 
-    # iy = 1
-    # Threads.@threads for ix in x_0:x_1
-    #     _f = f_new[:, ix, iy]
-    #     rho = (_f[1] + _f[2] + _f[4] + 2 * (_f[5] + _f[8] + _f[9])) / (1 - v_0)
-    #     f_new[3, ix, iy] = _f[5] + (2. / 3.) * rho * v_0 
-    #     f_new[6, ix, iy] = _f[8] + (1. / 6.) * rho * v_0 - 0.5 * (_f[2] - _f[4])
-    #     f_new[7, ix, iy] = _f[9] + (1. / 6.) * rho * v_0 + 0.5 * (_f[2] - _f[4])
-    # end
+    # Inlet 
+    iy = 1
+    Threads.@threads for ix in x_0:x_1
+        _f_i = f_i_new[:, ix, iy]
+        rho_i = - 2 / ( 3 * (1 - v_0)) + (v_0 / (3*(1 - v_0))) * (4 * _f_i[3] + _f_i[6] + _f_i[7])
+        f_i_new[5, ix, iy] = _f_i[3] + rho_i
+        f_i_new[8, ix, iy] = _f_i[6] + rho_i
+        f_i_new[9, ix, iy] = _f_i[7] + rho_i
+    end
 
-    # # Outlet
-    # iy = n_y
-    # Threads.@threads for ix in x_0:x_1
-    #     _f = f_new[:, ix, iy]
-    #     v = (1 - (_f[1] + _f[2] + _f[4] + 2 * (_f[3] + _f[7] + _f[6]))) / (rho_0)
-    #     f_new[5, ix, iy] = _f[3] + (2. / 3.) * rho_0 * v 
-    #     f_new[8, ix, iy] = _f[6] + (1. / 6.) * rho_0 * v + 0.5 * (_f[2] - _f[4])
-    #     f_new[9, ix, iy] = _f[7] + (1. / 6.) * rho_0 * v - 0.5 * (_f[2] - _f[4])
-    # end
+    # Outlet
+    iy = n_y
+    Threads.@threads for ix in x_0:x_1
+        _f_i = f_i_new[:, ix, iy]
+        v_i = (1. / 3.) * (4*_f_i[5] + _f_i[8] + _f_i[9])
+        f_i_new[3, ix, iy] = _f_i[5] - v_i
+        f_i_new[6, ix, iy] = _f_i[8] - v_i
+        f_i_new[7, ix, iy] = _f_i[9] - v_i
+    end
 
     
     f_i .= f_i_new
@@ -596,9 +594,12 @@ function ap_compute_moments(rho_i, j_i, m_i, f_i, u, v)
             for i in 1:9
                 rho_i[ix, iy] += w[i] * f_i[i, ix, iy] * (1.0 + 3.0 * (c[i, 1] * u[ix, iy] + c[i, 2] * v[ix, iy]) + 9.0 / 2.0 * (c[i, 1] * u[ix, iy] + c[i, 2] * v[ix, iy])^2 - 3.0 / 2.0 * (u[ix, iy]^2 + v[ix, iy]^2))
                 cu = c[i, 1] * u[ix, iy] + c[i, 2] * v[ix, iy]
-                j_i[1, ix, iy] += w[i] * f_i[i, ix, iy] * (c[i, 1] + 3.0 * (cu * c[i, 1] - u[ix, iy]))
-                j_i[2, ix, iy] += w[i] * f_i[i, ix, iy] * (c[i, 2] + 3.0 * (cu * c[i, 2] - v[ix, iy]))
-                m_i[:, ix, iy] .+= w[i] * f_i[i, ix, iy] .* c[i, :]
+
+                j_i[1, ix, iy] += w[i] * f_i[i, ix, iy] * (c[i, 1] + 3.0 * (cu * c[i, 1]) - u[ix, iy])
+                j_i[2, ix, iy] += w[i] * f_i[i, ix, iy] * (c[i, 2] + 3.0 * (cu * c[i, 2]) - v[ix, iy])
+
+                m_i[1, ix, iy] += w[i] * f_i[i, ix, iy] * c[i, 1]
+                m_i[2, ix, iy] += w[i] * f_i[i, ix, iy] * c[i, 2]
             end
         end
     end
@@ -646,8 +647,6 @@ function run_ap(f_i, rho_i, j_i, m_i, F_i, u, v, alpha_gamma, tau_f)
         # compute moments
         ap_compute_moments(rho_i, j_i, m_i, f_i, u, v)
 
-
-
         print("Step: $(t), Time: $(t * dt)\r")
     end
 end
@@ -673,7 +672,7 @@ function main()
 
     # adjoint
     f_i = zeros(Float32, 9, n_x, n_y)
-    rho_i = ones(Float32, n_x, n_y)
+    rho_i = zeros(Float32, n_x, n_y)
     j_i = zeros(Float32, 2, n_x, n_y)
     m_i = zeros(Float32, 2, n_x, n_y)
 
