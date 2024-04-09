@@ -33,7 +33,9 @@ const beta_max = 0.1
 const ramp_beta = 0.1
 
 const t_end = 100.0
-const n_t = Int(t_end / dt)
+# const n_t = Int(t_end / dt)
+const n_t = 100
+
 
 # Equation 68, 69
 const epsilon_u = 1e-4
@@ -449,14 +451,212 @@ function initial_conditions!(rho, u, v, T)
     end
 end
 
-function run_adjoint(f_i, g_i, u_i, v_i, T_i, m_i, q_i, alpha_gamma, beta_gamma, u, v)
+# Equation 70
+function ap_init_pops!(f_i)
+    Threads.@threads for ix in 1:n_x
+        for iy in 1:n_y
+            f_i[:,ix,iy] .= 0.0
+        end
+    end
+end
 
+# Equation 5
+function f_equilibrium!(f_eq, rho, u, v)
+    for i in 1:9
+        cu = c[i, 1] * u + c[i, 2] * v
+        f_eq[i] = w[i] * rho * (1 + 3 * cu + 9 / 2 * cu^2 - 3 / 2 * (u^2 + v^2))
+    end
+end
+
+# Equation 44
+function ap_f_equilibrium!(f_i_eq, rho_i, j_i, u, v)
+    for i in 1:9
+        f_i_eq[i] = rho_i + 3 * ((c[i, 1] - u) * j_i[1] + (c[i, 2] - v) * j_i[2])
+    end
+end
+
+# Equation 70
+function ap_relax!(f_i, rho_i, j_i, u, v, tau_f)
+    f_i_eq_thread_local = [zeros(Float32, 9) for i in 1:Threads.nthreads()]
+    
+    Threads.@threads for ix in 1:n_x
+        for iy in 1:n_y
+
+            ti = Threads.threadid()
+            ap_f_equilibrium!(f_i_eq_thread_local[ti], rho_i[ix,iy], j_i[:, ix, iy], u[ix,iy], v[ix,iy])
+
+            for i in 1:9
+                f_i[i,ix,iy] = f_i[i,ix,iy] - 1/tau_f * (f_i[i,ix,iy] - f_i_eq_thread_local[ti][i])
+            end
+        end
+    end
+end
+
+function ap_compute_F!(F_i, m_i, alpha_gamma)
+    F_i[1, :, :] .= - alpha_gamma .* m_i[1, :, :]
+    F_i[2, :, :] .= - alpha_gamma .* m_i[2, :, :]
+end
+
+function ap_force!(f_i, F_i)
+    Threads.@threads for ix in 1:n_x
+        for iy in 1:n_y
+            for i in 1:9
+                f_i[i,ix,iy] = f_i[i,ix,iy] + 3.0 * dx*w[i]*(c[i,1]*F_i[1,ix,iy] + c[i,2]*F_i[2,ix,iy])
+            end
+        end
+    end
+end
+
+function ap_advect_f!(f_i)
+    f_i_new = zero(f_i) 
+
+    Threads.@threads for ix in 1:n_x
+        for iy in 1:n_y
+            for i in 1:9
+                ix_new = ix + c[i, 1]
+                iy_new = iy + c[i, 2]
+
+                if ix_new < 1 || ix_new > n_x || iy_new < 1 || iy_new > n_y
+                    f_i_new[i, ix, iy] = 0.0
+                else
+                    f_i_new[i, ix, iy] = f_i[i, ix_new, iy_new]
+                end
+            end
+        end
+    end
+
+    ## Boundary Conditions
+
+    # x_0 = Int(floor((0.5 - 0.5 * inlet_width) * n_x))
+    # x_1 = Int(floor((0.5 + 0.5 * inlet_width) * n_x))
+
+    # # Bounce Back Left 
+    # ix = 1
+    # Threads.@threads for iy in 1:n_y
+    #     f_new[6,ix,iy] = f[8,ix,iy]
+    #     f_new[2,ix,iy] = f[4,ix,iy]
+    #     f_new[9,ix,iy] = f[7,ix,iy]
+    # end
+
+    # # Bounce Back Right
+    # ix = n_x
+    # Threads.@threads for iy in 1:n_y
+    #     f_new[8,ix,iy] = f[6,ix,iy]
+    #     f_new[4,ix,iy] = f[2,ix,iy]
+    #     f_new[7,ix,iy] = f[9,ix,iy]
+    # end
+
+    # # Bounce Back Bottom
+    # iy = 1
+    # Threads.@threads for ix in 1:n_x
+    #     f_new[3,ix,iy] = f[5,ix,iy]
+    #     f_new[6,ix,iy] = f[8,ix,iy]
+    #     f_new[7,ix,iy] = f[9,ix,iy]
+    # end
+
+    # # Bounce Back Top
+    # iy = n_y
+    # Threads.@threads for ix in 1:n_x
+    #     f_new[5,ix,iy] = f[3,ix,iy]
+    #     f_new[8,ix,iy] = f[6,ix,iy]
+    #     f_new[9,ix,iy] = f[7,ix,iy]
+    # end
+    
+    # # Inlet 
+    # iy = 1
+    # Threads.@threads for ix in x_0:x_1
+    #     _f = f_new[:, ix, iy]
+    #     rho = (_f[1] + _f[2] + _f[4] + 2 * (_f[5] + _f[8] + _f[9])) / (1 - v_0)
+    #     f_new[3, ix, iy] = _f[5] + (2. / 3.) * rho * v_0 
+    #     f_new[6, ix, iy] = _f[8] + (1. / 6.) * rho * v_0 - 0.5 * (_f[2] - _f[4])
+    #     f_new[7, ix, iy] = _f[9] + (1. / 6.) * rho * v_0 + 0.5 * (_f[2] - _f[4])
+    # end
+
+    # # Outlet
+    # iy = n_y
+    # Threads.@threads for ix in x_0:x_1
+    #     _f = f_new[:, ix, iy]
+    #     v = (1 - (_f[1] + _f[2] + _f[4] + 2 * (_f[3] + _f[7] + _f[6]))) / (rho_0)
+    #     f_new[5, ix, iy] = _f[3] + (2. / 3.) * rho_0 * v 
+    #     f_new[8, ix, iy] = _f[6] + (1. / 6.) * rho_0 * v + 0.5 * (_f[2] - _f[4])
+    #     f_new[9, ix, iy] = _f[7] + (1. / 6.) * rho_0 * v - 0.5 * (_f[2] - _f[4])
+    # end
+
+    
+    f_i .= f_i_new
+end
+
+function ap_compute_moments(rho_i, j_i, m_i, f_i, u, v)
+    Threads.@threads for ix in 1:n_x
+        for iy in 1:n_y
+            rho_i[ix, iy] = 0
+            j_i[:, ix, iy] .= 0
+            m_i[:, ix, iy] .= 0
+
+            for i in 1:9
+                rho_i[ix, iy] += w[i] * f_i[i, ix, iy] * (1.0 + 3.0 * (c[i, 1] * u[ix, iy] + c[i, 2] * v[ix, iy]) + 9.0 / 2.0 * (c[i, 1] * u[ix, iy] + c[i, 2] * v[ix, iy])^2 - 3.0 / 2.0 * (u[ix, iy]^2 + v[ix, iy]^2))
+                cu = c[i, 1] * u[ix, iy] + c[i, 2] * v[ix, iy]
+                j_i[1, ix, iy] += w[i] * f_i[i, ix, iy] * (c[i, 1] + 3.0 * (cu * c[i, 1] - u[ix, iy]))
+                j_i[2, ix, iy] += w[i] * f_i[i, ix, iy] * (c[i, 2] + 3.0 * (cu * c[i, 2] - v[ix, iy]))
+                m_i[:, ix, iy] .+= w[i] * f_i[i, ix, iy] .* c[i, :]
+            end
+        end
+    end
+end
+
+# ap: adjoint pressure minimization equation
+function run_ap(f_i, rho_i, j_i, m_i, F_i, u, v, alpha_gamma, tau_f)
+    x = range(0, stop=L_x, length=n_x)
+    y = range(0, stop=L_y, length=n_y)
+
+    # init_pops
+    ap_init_pops!(f_i)
+
+    # main loop
+    for t in 1:n_t
+        if mod1(t, output_interval) == 1
+
+            index = Int(floor(t/output_interval))
+
+            index = lpad(index,3,"0")
+
+            m_i_hm = heatmap(y, x, sqrt.(m_i[1, :, :].^2 + m_i[2, :, :].^2))
+            savefig("run/step_$(index)_m_i.png")
+            F_i_hm = heatmap(y, x, sqrt.(F_i[1,:,:].^2 + F_i[2,:,:].^2))
+            savefig("run/step_$(index)_F_i.png")
+            rho_i_hm = heatmap(y, x, rho_i)
+            savefig("run/step_$(index)_rho_i.png")
+
+            #println("Time: $ti")
+    
+        end
+
+        # relax
+        ap_relax!(f_i, rho_i, j_i, u, v, tau_f)
+        
+        # compute forces
+        ap_compute_F!(F_i, m_i, alpha_gamma)
+
+        # apply forces
+        ap_force!(f_i, F_i)
+
+        # advect
+        ap_advect_f!(f_i)
+
+        # compute moments
+        ap_compute_moments(rho_i, j_i, m_i, f_i, u, v)
+
+
+
+        print("Step: $(t), Time: $(t * dt)\r")
+    end
 end
 
 
 function main()
     `rm run/"*"`
     # allocation
+    # forward
     gamma = ones(Float32, n_x, n_y)
     rho = zeros(Float32, n_x, n_y)
     u = zeros(Float32, n_x, n_y)
@@ -464,14 +664,20 @@ function main()
     p = zeros(Float32, n_x, n_y)
     q_t = zeros(Float32, 2, n_x, n_y)
     T = zeros(Float32, n_x, n_y)
-    alpha_gamma = zeros(Float32, n_x, n_y)
-    beta_gamma = zeros(Float32, n_x, n_y)
 
     f = zeros(Float32, 9, n_x, n_y)
     g = zeros(Float32, 9, n_x, n_y)
 
     F = zeros(Float32, 2, n_x, n_y)
     Q_t = zeros(Float32, n_x, n_y)
+
+    # adjoint
+    f_i = zeros(Float32, 9, n_x, n_y)
+    rho_i = ones(Float32, n_x, n_y)
+    j_i = zeros(Float32, 2, n_x, n_y)
+    m_i = zeros(Float32, 2, n_x, n_y)
+
+    F_i = zeros(Float32, 2, n_x, n_y)
 
     # initial conditions
     create_gamma_from_noise!(gamma)
@@ -489,7 +695,7 @@ function main()
     run_forward!(gamma, rho, u, v, p, q_t, T, f, g, alpha_gamma, beta_gamma, tau_f, tau_g, F, Q_t)
 
     # adjoint
-    # run_adjoint!()
+    run_ap(f_i, rho_i, j_i, m_i, F_i, u, v, alpha_gamma, tau_f)
 
     # sensitivity computation
 end
