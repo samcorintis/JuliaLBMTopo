@@ -3,6 +3,7 @@ module ALBM
 using Plots
 using CoherentNoise
 using .Threads
+using Printf
 
 const c = [  0   0; 
              1   0;
@@ -16,16 +17,16 @@ const c = [  0   0;
 
 const w = [4 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 9, 1 / 36, 1 / 36, 1 / 36, 1 / 36]
 
-const resolution = 512
+const resolution = 256
 const dx = 1 / resolution
 const dt = dx
 
-const output_interval = 100
+const output_interval = 249
 
 
 # Equation 32
 const alpha_min = 0.0
-const alpha_max = 2e2
+const alpha_max = 4e2
 const ramp_alpha = 0.1
 
 const beta_min = 0.0
@@ -34,7 +35,7 @@ const ramp_beta = 0.1
 
 const t_end = 100.0
 # const n_t = Int(t_end / dt)
-const n_t = 1000
+const n_t = 500
 
 
 # Equation 68, 69
@@ -66,6 +67,8 @@ const inlet_width = 0.33
 
 const T_0 = 0.0
 const T_in = 0.0
+
+const epsilon_test_ap = 1e-4
 
 function pow(x,y)
     return x^y
@@ -363,12 +366,36 @@ function advect_g!(g, f)
         g_new[3, ix, iy] = 1/9*T*(1+3*v)
         g_new[7, ix, iy] = 1/36*T*(1+3*v)
     end
-    
-   
- 
+
     g .= g_new
 end
 
+
+
+function evaluate_objective_pressure(p)
+    # Inlet
+    x_0 = Int(floor((0.5 - 0.5 * inlet_width) * n_x))
+    x_1 = Int(floor((0.5 + 0.5 * inlet_width) * n_x))
+
+    p_inlet = 0.0
+    iy = 1
+    Threads.@threads for ix in x_0:x_1
+        p_inlet += p[ix, iy]
+    end
+
+    p_inlet /= (x_1 - x_0 + 1)
+
+    # Outlet
+    p_outlet = 0.0
+    iy = n_y
+    Threads.@threads for ix in x_0:x_1
+        p_outlet += p[ix, iy]
+    end
+
+    p_outlet /= (x_1 - x_0 + 1)
+
+    return p_inlet - p_outlet
+end
 
 
 function run_forward!(gamma, rho, u, v, p, q_t, T, f, g, alpha_gamma, beta_gamma, tau_f, tau_g, F, Q_t)
@@ -377,9 +404,8 @@ function run_forward!(gamma, rho, u, v, p, q_t, T, f, g, alpha_gamma, beta_gamma
 
     init_pops!(f, g, rho, u, v, T)
     
+    objective_pressure_transient = 0.0
     for t in 1:n_t
-
-
         if mod1(t, output_interval) == 1
 
             index = Int(floor(t/output_interval))
@@ -419,9 +445,12 @@ function run_forward!(gamma, rho, u, v, p, q_t, T, f, g, alpha_gamma, beta_gamma
 
         compute_moments!(rho, u, v, p, q_t, T, f, g)
         
-
-        print("Step: $(t), Time: $(t * dt)\r")
+        objective_pressure = evaluate_objective_pressure(p)
+        objective_pressure_transient += objective_pressure
+        print("""Step: $(t), Time: $(@sprintf("%.2f", t * dt)), objective_pressure: $(@sprintf("%.4f", objective_pressure))\r""")
     end
+
+    return objective_pressure_transient / (n_t * dt)
 end
 
 
@@ -436,6 +465,22 @@ function create_gamma_from_noise!(gamma)
                 if sample(noise, 10*xl, 10*yl) > 0.7
                     gamma[i, j] = 0.0
                 end
+            end
+        end
+    end
+end
+
+# Circle in the middle
+function create_gamma_test_ap!(gamma)
+    Threads.@threads for i in 1:n_x
+        for j in 1:n_y
+            xl = (i - 1 + 0.5) * dx
+            yl = (j - 1 + 0.5) * dx
+            
+            if (xl - 0.5)^2 + (yl - 1.0)^2 < 0.1^2
+                gamma[i, j] = 0.1
+            else 
+                gamma[i, j] = 0.9
             end
         end
     end
@@ -661,6 +706,94 @@ function run_ap(f_i, rho_i, j_i, m_i, F_i, u, v, alpha_gamma, tau_f)
     end
 end
 
+function ap_compute_sensitivity!(dJdgamma, u, v, m_i, gamma)
+    Threads.@threads for ix in 1:n_x
+        for iy in 1:n_y
+            um = u[ix, iy] * m_i[1, ix, iy] + v[ix, iy] * m_i[2, ix, iy]
+            alpha_gamma_prime = (alpha_min - alpha_max) * (1 - gamma[ix, iy] / (gamma[ix, iy] + ramp_alpha)) * (1 + ramp_alpha)  / (gamma[ix, iy] + ramp_alpha)
+            dJdgamma[ix, iy] = 3 * alpha_gamma_prime * um
+        end
+    end
+
+    # normalize
+    dJdgamma ./= L_x * L_y
+end
+
+
+function test_ap_adjoint()
+    x = range(0, stop=L_x, length=n_x)
+    y = range(0, stop=L_y, length=n_y)
+
+    # allocation
+    gamma = ones(Float32, n_x, n_y)
+    create_gamma_from_noise!(gamma)
+
+    # gamma .*= 1.
+
+    for i in 1:100
+        rho = zeros(Float32, n_x, n_y)
+        u = zeros(Float32, n_x, n_y)
+        v = zeros(Float32, n_x, n_y)
+        p = zeros(Float32, n_x, n_y)
+        q_t = zeros(Float32, 2, n_x, n_y)
+        T = zeros(Float32, n_x, n_y)
+
+        f = zeros(Float32, 9, n_x, n_y)
+        g = zeros(Float32, 9, n_x, n_y)
+
+        F = zeros(Float32, 2, n_x, n_y)
+        Q_t = zeros(Float32, n_x, n_y)
+
+        # adjoint
+        f_i = zeros(Float32, 9, n_x, n_y)
+        rho_i = zeros(Float32, n_x, n_y)
+        j_i = zeros(Float32, 2, n_x, n_y)
+        m_i = zeros(Float32, 2, n_x, n_y)
+
+        F_i = zeros(Float32, 2, n_x, n_y)
+
+        # sensitivity
+        dJdgamma = zeros(Float32, n_x, n_y)
+
+        # initial conditions
+        # create_gamma_test_ap!(gamma)
+
+
+        # tau_f = compute_tau_f()$
+        tau_f = 0.8
+        tau_g = compute_tau_g()
+
+        alpha_gamma = compute_alpha_gamma(gamma)
+        beta_gamma = compute_beta_gamma(gamma)
+
+        initial_conditions!(rho, u, v, T)
+    
+        # run forward
+        objective_pressure_transient = run_forward!(gamma, rho, u, v, p, q_t, T, f, g, alpha_gamma, beta_gamma, tau_f, tau_g, F, Q_t)
+        
+        println("\n Objective Transient Pressure: $objective_pressure_transient")
+
+        # adjoint
+        run_ap(f_i, rho_i, j_i, m_i, F_i, u, v, alpha_gamma, tau_f) 
+
+        ap_compute_sensitivity!(dJdgamma, u, v, m_i, gamma)
+
+        # plot sensitivity
+        sensitivity = heatmap(y, x, dJdgamma)
+        savefig("run/sensitivity_$(i).png")
+        
+        # steepest descent
+        gamma .-= 100 * dJdgamma
+        gamma = clamp.(gamma, 0, 1)
+
+        # plot gamma
+        gamma_hm = heatmap(y, x, gamma)
+        savefig("run/gamma_$(i).png")
+
+        alpha_gamma = compute_alpha_gamma(gamma)
+        beta_gamma = compute_beta_gamma(gamma)
+    end
+end
 
 function main()
     `rm run/"*"`
@@ -701,7 +834,9 @@ function main()
     initial_conditions!(rho, u, v, T)
 
     # run forward
-    run_forward!(gamma, rho, u, v, p, q_t, T, f, g, alpha_gamma, beta_gamma, tau_f, tau_g, F, Q_t)
+    objective_pressure_transient = run_forward!(gamma, rho, u, v, p, q_t, T, f, g, alpha_gamma, beta_gamma, tau_f, tau_g, F, Q_t)
+    
+    println("\n Objective Transient Pressure: $objective_pressure_transient")
 
     # adjoint
     run_ap(f_i, rho_i, j_i, m_i, F_i, u, v, alpha_gamma, tau_f)
